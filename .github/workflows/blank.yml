@@ -1,34 +1,34 @@
-name: Move issue to In Progress on milestone
+name: Add issue to Backlog
 
 on:
   issues:
     types: [milestoned]
 
 jobs:
-  move-issue:
+  add-to-backlog:
+    name: Add issue to Backlog
     runs-on: ubuntu-latest
     steps:
-      - name: Add issue to project and set Status
+      - name: Get project data
         env:
-          GH_TOKEN: ${{ secrets.TOKEN_TEST }}   # PAT с scopes: project, repo
-          ORGANIZATION: testovayaorganizatsia       # заменить на вашу орг-ю
-          PROJECT_NUMBER: 1                         # номер из URL проекта
-          ISSUE_ID: ${{ github.event.issue.node_id }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN_TEST }}
+          ORGANIZATION: testovayaorganizatsia
+          PROJECT_NUMBER: 1 # Укажите номер вашего проекта
         run: |
-          set -euo pipefail
-
-          # 1) Получить ID проекта и полей (включая опции Status)
           gh api graphql -f query='
             query($org: String!, $number: Int!) {
-              organization(login: $org) {
+              organization(login: $org){
                 projectV2(number: $number) {
                   id
-                  fields(first: 50) {
+                  fields(first: 20) {
                     nodes {
-                      ... on ProjectV2Field { id name }
                       ... on ProjectV2SingleSelectField {
-                        id name
-                        options { id name }
+                        id
+                        name
+                        options {
+                          id
+                          name
+                        }
                       }
                     }
                   }
@@ -36,44 +36,50 @@ jobs:
               }
             }' -f org=$ORGANIZATION -F number=$PROJECT_NUMBER > project_data.json
 
-          PROJECT_ID=$(jq -r '.data.organization.projectV2.id' project_data.json)
-          STATUS_FIELD_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .id' project_data.json)
-          INPROG_OPTION_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .options[] | select(.name=="In Progress") | .id' project_data.json)
+          echo 'PROJECT_ID='$(jq -r '.data.organization.projectV2.id' project_data.json) >> $GITHUB_ENV
+          echo 'TODO_COLUMN_ID='$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .options[] | select(.name=="Todo") | .id' project_data.json) >> $GITHUB_ENV
 
-          # 2) Добавить issue в проект (если уже есть — не падать)
-          ITEM_ID=$(gh api graphql -f query='
-            mutation($project: ID!, $content: ID!) {
-              addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
-                item { id }
-              }
-            }' -f project=$PROJECT_ID -f content=$ISSUE_ID --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null || true)
-
-          # Если уже был в проекте — найти существующий item для этого проекта
-          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-            ITEM_ID=$(gh api graphql -f query='
-              query($issue: ID!) {
-                node(id: $issue) {
-                  ... on Issue {
-                    projectItems(first: 50) {
-                      nodes {
-                        id
-                        project { ... on ProjectV2 { id } }
-                      }
-                    }
-                  }
-                }
-              }' -f issue=$ISSUE_ID --jq ".data.node.projectItems.nodes[] | select(.project.id==\"$PROJECT_ID\") | .id")
-          fi
-
-          # 3) Установить поле Status = In Progress
+      - name: Add issue to project
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN_TEST }}
+          ISSUE_ID: ${{ github.event.issue.node_id }}
+        run: |
           gh api graphql -f query='
-            mutation($project: ID!, $item: ID!, $status_field: ID!, $status_value: String!) {
-              updateProjectV2ItemFieldValue(input: {
-                projectId: $project
-                itemId: $item
-                fieldId: $status_field
-                value: { singleSelectOptionId: $status_value }
-              }) {
-                projectV2Item { id }
+            mutation($project: ID!, $issue: ID!) {
+              addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
+                item {
+                  id
+                }
               }
-            }' -f project=$PROJECT_ID -f item=$ITEM_ID -f status_field=$STATUS_FIELD_ID -f status_value=$INPROG_OPTION_ID --silent
+            }' -f project=$PROJECT_ID -f issue=$ISSUE_ID --jq '.data.addProjectV2ItemById.item.id' > item_id.txt
+
+          echo 'ITEM_ID='$(cat item_id.txt) >> $GITHUB_ENV
+
+      - name: Move issue to Todo
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN_TEST }}
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          ITEM_ID: ${{ env.ITEM_ID }}
+          TODO_COLUMN_ID: ${{ env.TODO_COLUMN_ID }}
+          STATUS_FIELD_ID: $(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .id' project_data.json)
+        run: |
+          gh api graphql -f query='
+            mutation (
+              $project: ID!,
+              $item: ID!,
+              $status_field: ID!,
+              $status_value: String!
+            ) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $project,
+                itemId: $item,
+                fieldId: $status_field,
+                value: {
+                  singleSelectOptionId: $status_value
+                }
+              }) {
+                item {
+                  id
+                }
+              }
+            }' -f project=$PROJECT_ID -f item=$ITEM_ID -f status_field=$STATUS_FIELD_ID -f status_value=$TODO_COLUMN_ID
