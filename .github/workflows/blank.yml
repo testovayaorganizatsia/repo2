@@ -36,12 +36,10 @@ jobs:
               }
             }' -f org=$ORGANIZATION -F number=$PROJECT_NUMBER > project_data.json
 
-          echo "===== RAW project_data.json ====="
-          cat project_data.json | jq .
-
           echo "PROJECT_ID=$(jq -r '.data.organization.projectV2.id' project_data.json)" >> $GITHUB_ENV
           echo "TODO_COLUMN_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name==\"Status\") | .options[] | select(.name==\"Todo\") | .id' project_data.json)" >> $GITHUB_ENV
           echo "STATUS_FIELD_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name==\"Status\") | .id' project_data.json)" >> $GITHUB_ENV
+
       - name: Add issue to project
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN_TEST }}
@@ -83,8 +81,8 @@ jobs:
                 }
               }
             }
-            ' \
-            -f project=$PROJECT_ID \
-            -f item=$ITEM_ID \
-            -f status_field=$STATUS_FIELD_ID \
-            -f status_value=$TODO_COLUMN_ID
+          ' \
+          -f project=$PROJECT_ID \
+          -f item=$ITEM_ID \
+          -f status_field=$STATUS_FIELD_ID \
+          -f status_value=$TODO_COLUMN_ID
