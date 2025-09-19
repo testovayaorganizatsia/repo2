@@ -36,24 +36,24 @@ jobs:
               }
             }' -f org=$ORGANIZATION -F number=$PROJECT_NUMBER > project_data.json
 
-          echo 'PROJECT_ID='$(jq -r '.data.organization.projectV2.id' project_data.json) >> $GITHUB_ENV
-          echo 'TODO_COLUMN_ID='$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .options[] | select(.name=="Todo") | .id' project_data.json) >> $GITHUB_ENV
+          echo "PROJECT_ID=$(jq -r '.data.organization.projectV2.id' project_data.json)" >> $GITHUB_ENV
+          echo "TODO_COLUMN_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name==\"Status\") | .options[] | select(.name==\"Todo\") | .id' project_data.json)" >> $GITHUB_ENV
+          echo "STATUS_FIELD_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name==\"Status\") | .id' project_data.json)" >> $GITHUB_ENV
 
       - name: Add issue to project
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN_TEST }}
           ISSUE_ID: ${{ github.event.issue.node_id }}
+          PROJECT_ID: ${{ env.PROJECT_ID }}
         run: |
-          gh api graphql -f query='
+          ITEM_ID=$(gh api graphql -f query='
             mutation($project: ID!, $issue: ID!) {
               addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
-                item {
-                  id
-                }
+                item { id }
               }
-            }' -f project=$PROJECT_ID -f issue=$ISSUE_ID --jq '.data.addProjectV2ItemById.item.id' > item_id.txt
+            }' -f project=$PROJECT_ID -f issue=$ISSUE_ID --jq '.data.addProjectV2ItemById.item.id')
 
-          echo 'ITEM_ID='$(cat item_id.txt) >> $GITHUB_ENV
+          echo "ITEM_ID=$ITEM_ID" >> $GITHUB_ENV
 
       - name: Move issue to Todo
         env:
@@ -61,7 +61,7 @@ jobs:
           PROJECT_ID: ${{ env.PROJECT_ID }}
           ITEM_ID: ${{ env.ITEM_ID }}
           TODO_COLUMN_ID: ${{ env.TODO_COLUMN_ID }}
-          STATUS_FIELD_ID: $(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Status") | .id' project_data.json)
+          STATUS_FIELD_ID: ${{ env.STATUS_FIELD_ID }}
         run: |
           gh api graphql -f query='
             mutation (
@@ -74,12 +74,12 @@ jobs:
                 projectId: $project,
                 itemId: $item,
                 fieldId: $status_field,
-                value: {
-                  singleSelectOptionId: $status_value
-                }
+                value: { singleSelectOptionId: $status_value }
               }) {
-                item {
-                  id
-                }
+                item { id }
               }
-            }' -f project=$PROJECT_ID -f item=$ITEM_ID -f status_field=$STATUS_FIELD_ID -f status_value=$TODO_COLUMN_ID
+            }' \
+            -f project=$PROJECT_ID \
+            -f item=$ITEM_ID \
+            -f status_field=$STATUS_FIELD_ID \
+            -f status_value=$TODO_COLUMN_ID
