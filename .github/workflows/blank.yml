@@ -8,11 +8,21 @@ jobs:
   move-issue:
     runs-on: ubuntu-latest
     steps:
-      - name: Move issue to In Progress column
-        uses: fojia/action-move-issues-to-column@master
+      # Шаг 1: Добавляет задачу в проект. Если она уже там, просто находит ее.
+      - name: Add issue to project
+        uses: peter-evans/add-to-project@v3
+        id: add_to_project
         with:
-          project: 'first'
-          column: 'In Progress'
-          owner: 'testovayaorganizatsia'
-          type: 'org'
-          github_token: ${{ secrets.TOKEN_TEST }}
+          # ВАЖНО: Замените YOUR_PROJECT_NUMBER на номер вашего проекта
+          project-url: "https://github.com/orgs/testovayaorganizatsia/projects/YOUR_PROJECT_NUMBER"
+          github-token: ${{ secrets.TOKEN_TEST }}
+
+      # Шаг 2: Устанавливает для задачи в проекте статус "In Progress"
+      - name: Set issue status to 'In Progress'
+        uses: peter-evans/set-project-v2-item-field@v3
+        with:
+          token: ${{ secrets.TOKEN_TEST }}
+          project-id: ${{ steps.add_to_project.outputs.projectId }} # ID проекта из предыдущего шага
+          item-id: ${{ steps.add_to_project.outputs.itemId }}     # ID задачи из предыдущего шага
+          field-name: "Status"         # Название поля статуса в вашем проекте
+          field-value: "In Progress"   # Значение, которое нужно установить
