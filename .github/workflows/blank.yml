@@ -13,7 +13,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN_TEST }}
           ORGANIZATION: testovayaorganizatsia
-          PROJECT_NUMBER: 1 # Укажите номер вашего проекта
+          PROJECT_NUMBER: 1
         run: |
           gh api graphql -f query='
             query($org: String!, $number: Int!) {
@@ -36,8 +36,11 @@ jobs:
               }
             }' -f org=$ORGANIZATION -F number=$PROJECT_NUMBER > project_data.json
 
+          echo "===== RAW project_data.json ====="
+          cat project_data.json | jq .
+
           echo "PROJECT_ID=$(jq -r '.data.organization.projectV2.id' project_data.json)" >> $GITHUB_ENV
-          echo "TODO_COLUMN_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name==\"Status\") | .options[] | select(.name==\"Todo\") | .id' project_data.json)" >> $GITHUB_ENV
+          echo "TODO_COLUMN_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name==\"Status\") | .options[] | select(.name==\"To do\") | .id' project_data.json)" >> $GITHUB_ENV
           echo "STATUS_FIELD_ID=$(jq -r '.data.organization.projectV2.fields.nodes[] | select(.name==\"Status\") | .id' project_data.json)" >> $GITHUB_ENV
 
       - name: Add issue to project
