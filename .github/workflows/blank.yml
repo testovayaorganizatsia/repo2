@@ -80,6 +80,7 @@ jobs:
                   id
                 }
               }
+            }
             ' \
             -f project=$PROJECT_ID \
             -f item=$ITEM_ID \
