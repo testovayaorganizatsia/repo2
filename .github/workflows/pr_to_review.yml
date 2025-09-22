@@ -16,32 +16,24 @@ jobs:
       - name: Move PR to "In review" in org project
         uses: actions/github-script@v7
         with:
-          # Если GITHUB_TOKEN не видит проект, используйте PAT:
-          # github-token: ${{ secrets.GH_PAT }}
+          # Если GITHUB_TOKEN не видит проект, раскомментируйте строку ниже и добавьте secrets.ORG_PAT
+          # github-token: ${{ secrets.ORG_PAT }}
           script: |
             const org = 'testovayaorganizatsia';
-            const projectNumber = 1; // Замените на номер из URL: https://github.com/orgs/<org>/projects/<number>
+            const projectNumber = 1; // замените на номер из https://github.com/orgs/<org>/projects/<number>
             const statusFieldName = 'Status';
             const statusOptionName = 'In review';
 
             const pr = context.payload.pull_request;
-            if (!pr) {
-              core.setFailed('No pull_request payload');
-              return;
-            }
-            if (pr.draft) {
-              core.notice('PR is draft; skipping project status update');
-              return;
-            }
-            const prNodeId = pr.node_id;
+            if (!pr) return core.setFailed('No pull_request payload');
+            if (pr.draft) { core.notice('PR is draft; skipping'); return; }
 
-            // 1) Получить проект по номеру
+            // Получить проект по номеру
             const data = await github.graphql(
               `query($org:String!, $number:Int!){
                 organization(login:$org){
                   projectV2(number:$number){
                     id
-                    title
                     fields(first:100){
                       nodes{
                         ... on ProjectV2SingleSelectField {
@@ -56,25 +48,16 @@ jobs:
               }`,
               { org, number: projectNumber }
             );
-
             const project = data.organization?.projectV2;
-            if (!project) {
-              core.setFailed(`Project #${projectNumber} not found in org "${org}"`);
-              return;
-            }
+            if (!project) return core.setFailed(`Project #${projectNumber} not found in org "${org}"`);
 
-            const statusField = (project.fields?.nodes || []).find(f => f?.name === statusFieldName);
-            if (!statusField) {
-              core.setFailed(`Field "${statusFieldName}" not found in project "${project.title}"`);
-              return;
-            }
-            const statusOption = (statusField.options || []).find(o => o.name === statusOptionName);
-            if (!statusOption) {
-              core.setFailed(`Status option "${statusOptionName}" not found in field "${statusFieldName}"`);
-              return;
-            }
+            const statusField = (project.fields?.nodes||[]).find(f => f?.name === statusFieldName);
+            if (!statusField) return core.setFailed(`Field "${statusFieldName}" not found`);
+            const statusOption = (statusField.options||[]).find(o => o.name === statusOptionName);
+            if (!statusOption) return core.setFailed(`Option "${statusOptionName}" not found`);
 
-            // 2) Добавить PR в проект (если его там нет)
+            // Добавить PR в проект (если его там нет)
+            const prNodeId = pr.node_id;
             let itemId = null;
             try {
               const addRes = await github.graphql(
@@ -87,22 +70,19 @@ jobs:
               );
               itemId = addRes?.addProjectV2ItemById?.item?.id || null;
             } catch (e) {
-              core.info(`addProjectV2ItemById failed (maybe already exists): ${e.message}`);
+              core.info(`addProjectV2ItemById: ${e.message}`);
             }
 
-            // 3) Найти существующий item, если не получили id
             if (!itemId) {
+              // Найти уже существующий item
               let after = null;
-              for (;;) {
-                const itemsRes = await github.graphql(
+              for(;;){
+                const res = await github.graphql(
                   `query($projectId:ID!, $after:String){
                     node(id:$projectId){
                       ... on ProjectV2 {
                         items(first:100, after:$after){
-                          nodes{
-                            id
-                            content { ... on PullRequest { id } }
-                          }
+                          nodes{ id content { ... on PullRequest { id } } }
                           pageInfo { hasNextPage endCursor }
                         }
                       }
@@ -110,38 +90,26 @@ jobs:
                   }`,
                   { projectId: project.id, after }
                 );
-                const conn = itemsRes?.node?.items;
-                const nodes = conn?.nodes || [];
-                const match = nodes.find(n => n.content && n.content.id === prNodeId);
+                const conn = res?.node?.items;
+                const match = (conn?.nodes||[]).find(n => n.content && n.content.id === prNodeId);
                 if (match) { itemId = match.id; break; }
                 if (!conn?.pageInfo?.hasNextPage) break;
                 after = conn.pageInfo.endCursor;
               }
             }
 
-            if (!itemId) {
-              core.setFailed('Project item for this PR not found or could not be created');
-              return;
-            }
+            if (!itemId) return core.setFailed('Project item not found or could not be created');
 
-            // 4) Установить Status = "In review"
+            // Установить Status = "In review"
             await github.graphql(
               `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
                 updateProjectV2ItemFieldValue(input:{
-                  projectId: $projectId,
-                  itemId: $itemId,
-                  fieldId: $fieldId,
-                  value: { singleSelectOptionId: $optionId }
-                }){
-                  projectV2Item { id }
-                }
+                  projectId:$projectId,
+                  itemId:$itemId,
+                  fieldId:$fieldId,
+                  value:{ singleSelectOptionId:$optionId }
+                }){ projectV2Item { id } }
               }`,
-              {
-                projectId: project.id,
-                itemId,
-                fieldId: statusField.id,
-                optionId: statusOption.id
-              }
+              { projectId: project.id, itemId, fieldId: statusField.id, optionId: statusOption.id }
             );
-
             core.info('PR moved to "In review"');
