@@ -1,0 +1,152 @@
+name: Move PRs to "In review" in Project
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  repository-projects: write
+
+jobs:
+  move-to-in-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Move PR to "In review" in org project
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const org = 'testovayaorganizatsia';
+            const projectTitle = 'first';
+            const statusFieldName = 'Status';
+            const statusOptionName = 'In review';
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.setFailed('No pull_request payload');
+              return;
+            }
+            if (pr.draft) {
+              core.notice('PR is draft; skipping project status update');
+              return;
+            }
+            const prNodeId = pr.node_id;
+
+            // 1) Find the org project by title and get Status field + option
+            const orgData = await github.graphql(
+              `query($org:String!){
+                organization(login:$org){
+                  projectsV2(first:100){
+                    nodes{
+                      id
+                      title
+                      fields(first:100){
+                        nodes{
+                          ... on ProjectV2SingleSelectField {
+                            id
+                            name
+                            options { id name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }`,
+              { org }
+            );
+
+            const projects = orgData.organization?.projectsV2?.nodes || [];
+            const project = projects.find(p => p.title === projectTitle);
+            if (!project) {
+              core.setFailed(`Project "${projectTitle}" not found in org "${org}"`);
+              return;
+            }
+
+            const statusField = (project.fields?.nodes || []).find(f => f?.name === statusFieldName);
+            if (!statusField) {
+              core.setFailed(`Field "${statusFieldName}" not found in project "${projectTitle}"`);
+              return;
+            }
+
+            const statusOption = (statusField.options || []).find(o => o.name === statusOptionName);
+            if (!statusOption) {
+              core.setFailed(`Status option "${statusOptionName}" not found in field "${statusFieldName}"`);
+              return;
+            }
+
+            // 2) Add PR to the project (if not already there)
+            let itemId = null;
+            try {
+              const addRes = await github.graphql(
+                `mutation($projectId:ID!, $contentId:ID!){
+                  addProjectV2ItemById(input:{ projectId:$projectId, contentId:$contentId }){
+                    item { id }
+                  }
+                }`,
+                { projectId: project.id, contentId: prNodeId }
+              );
+              itemId = addRes?.addProjectV2ItemById?.item?.id || null;
+            } catch (e) {
+              core.info(`addProjectV2ItemById failed (maybe already exists): ${e.message}`);
+            }
+
+            // 3) If itemId unknown, search for existing PR item in the project
+            if (!itemId) {
+              let after = null;
+              for (;;) {
+                const itemsRes = await github.graphql(
+                  `query($projectId:ID!, $after:String){
+                    node(id:$projectId){
+                      ... on ProjectV2 {
+                        items(first:100, after:$after){
+                          nodes{
+                            id
+                            content { ... on PullRequest { id } }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      }
+                    }
+                  }`,
+                  { projectId: project.id, after }
+                );
+                const conn = itemsRes?.node?.items;
+                const nodes = conn?.nodes || [];
+                const match = nodes.find(n => n.content && n.content.id === prNodeId);
+                if (match) {
+                  itemId = match.id;
+                  break;
+                }
+                if (!conn?.pageInfo?.hasNextPage) break;
+                after = conn.pageInfo.endCursor;
+              }
+            }
+
+            if (!itemId) {
+              core.setFailed('Project item for this PR not found or could not be created');
+              return;
+            }
+
+            // 4) Set Status = "In review"
+            await github.graphql(
+              `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
+                updateProjectV2ItemFieldValue(input:{
+                  projectId: $projectId,
+                  itemId: $itemId,
+                  fieldId: $fieldId,
+                  value: { singleSelectOptionId: $optionId }
+                }){
+                  projectV2Item { id }
+                }
+              }`,
+              {
+                projectId: project.id,
+                itemId,
+                fieldId: statusField.id,
+                optionId: statusOption.id
+              }
+            );
+
+            core.info('PR moved to "In review"');
