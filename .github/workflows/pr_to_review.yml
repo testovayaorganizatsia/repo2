@@ -1,39 +1,69 @@
-name: Move PRs to "In review" in Project
+name: PR → In review (Projects V2)
 
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
 
+# permissions не влияют на PAT, но оставим минимальные
 permissions:
   contents: read
   pull-requests: read
-  repository-projects: write
 
 jobs:
   move-to-in-review:
     runs-on: ubuntu-latest
     steps:
-      - name: Move PR to "In review" in org project
+      - name: Debug token access (viewer/org)
         uses: actions/github-script@v7
         with:
-          # Если GITHUB_TOKEN не видит проект, раскомментируйте строку ниже и добавьте secrets.ORG_PAT
-          # github-token: ${{ secrets.ORG_PAT }}
+          github-token: ${{ secrets.TOKEN_TEST }}
           script: |
             const org = 'testovayaorganizatsia';
-            const projectNumber = 1; // замените на номер из https://github.com/orgs/<org>/projects/<number>
+            const viewer = await github.graphql(`query { viewer { login } }`);
+            core.info(`Viewer: ${viewer.viewer.login}`);
+            try {
+              const orgRes = await github.request('GET /orgs/{org}', { org });
+              core.info(`Org ok: ${orgRes.data.login}`);
+            } catch (e) {
+              core.warning(`Org access failed: ${e.message}. Ensure PAT has read:org (fine-grained: Members: Read) and SSO enabled.`);
+            }
+
+      - name: Move PR to "In review"
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOKEN_TEST }}
+          script: |
+            const org = 'testovayaorganizatsia';
+            const projectNumber = 1; // замените на номер из URL: https://github.com/orgs/<org>/projects/<number>
             const statusFieldName = 'Status';
             const statusOptionName = 'In review';
+
+            const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+            async function gql(q, v, retries=3){
+              for (let i=0;i<retries;i++){
+                try { return await github.graphql(q, v); }
+                catch(e){ 
+                  const msg = e?.message || String(e);
+                  if (i===retries-1) throw e;
+                  if (/Something went wrong/i.test(msg) || (e.status && e.status>=500)) {
+                    core.warning(`Retry ${i+1}: ${msg}`); await sleep(1000*(i+1)); continue;
+                  }
+                  throw e;
+                }
+              }
+            }
 
             const pr = context.payload.pull_request;
             if (!pr) return core.setFailed('No pull_request payload');
             if (pr.draft) { core.notice('PR is draft; skipping'); return; }
 
-            // Получить проект по номеру
-            const data = await github.graphql(
+            // 1) Получить проект по номеру
+            const data = await gql(
               `query($org:String!, $number:Int!){
                 organization(login:$org){
                   projectV2(number:$number){
                     id
+                    title
                     fields(first:100){
                       nodes{
                         ... on ProjectV2SingleSelectField {
@@ -52,15 +82,15 @@ jobs:
             if (!project) return core.setFailed(`Project #${projectNumber} not found in org "${org}"`);
 
             const statusField = (project.fields?.nodes||[]).find(f => f?.name === statusFieldName);
-            if (!statusField) return core.setFailed(`Field "${statusFieldName}" not found`);
+            if (!statusField) return core.setFailed(`Field "${statusFieldName}" not found in project "${project.title}"`);
             const statusOption = (statusField.options||[]).find(o => o.name === statusOptionName);
             if (!statusOption) return core.setFailed(`Option "${statusOptionName}" not found`);
 
-            // Добавить PR в проект (если его там нет)
+            // 2) Добавить PR в проект
             const prNodeId = pr.node_id;
             let itemId = null;
             try {
-              const addRes = await github.graphql(
+              const addRes = await gql(
                 `mutation($projectId:ID!, $contentId:ID!){
                   addProjectV2ItemById(input:{ projectId:$projectId, contentId:$contentId }){
                     item { id }
@@ -70,14 +100,14 @@ jobs:
               );
               itemId = addRes?.addProjectV2ItemById?.item?.id || null;
             } catch (e) {
-              core.info(`addProjectV2ItemById: ${e.message}`);
+              core.info(`addProjectV2ItemById: ${e.message} (may already exist)`);
             }
 
+            // 3) Найти item, если уже существует
             if (!itemId) {
-              // Найти уже существующий item
               let after = null;
-              for(;;){
-                const res = await github.graphql(
+              for (;;) {
+                const res = await gql(
                   `query($projectId:ID!, $after:String){
                     node(id:$projectId){
                       ... on ProjectV2 {
@@ -91,7 +121,7 @@ jobs:
                   { projectId: project.id, after }
                 );
                 const conn = res?.node?.items;
-                const match = (conn?.nodes||[]).find(n => n.content && n.content.id === prNodeId);
+                const match = (conn?.nodes||[]).find(n => n.content && n.content.id === pr.node_id);
                 if (match) { itemId = match.id; break; }
                 if (!conn?.pageInfo?.hasNextPage) break;
                 after = conn.pageInfo.endCursor;
@@ -100,8 +130,8 @@ jobs:
 
             if (!itemId) return core.setFailed('Project item not found or could not be created');
 
-            // Установить Status = "In review"
-            await github.graphql(
+            // 4) Установить Status = "In review"
+            await gql(
               `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
                 updateProjectV2ItemFieldValue(input:{
                   projectId:$projectId,
