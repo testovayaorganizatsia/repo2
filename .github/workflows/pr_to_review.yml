@@ -16,9 +16,11 @@ jobs:
       - name: Move PR to "In review" in org project
         uses: actions/github-script@v7
         with:
+          # Если GITHUB_TOKEN не видит проект, используйте PAT:
+          # github-token: ${{ secrets.GH_PAT }}
           script: |
             const org = 'testovayaorganizatsia';
-            const projectTitle = 'first';
+            const projectNumber = 1; // Замените на номер из URL: https://github.com/orgs/<org>/projects/<number>
             const statusFieldName = 'Status';
             const statusOptionName = 'In review';
 
@@ -33,50 +35,46 @@ jobs:
             }
             const prNodeId = pr.node_id;
 
-            // 1) Find the org project by title and get Status field + option
-            const orgData = await github.graphql(
-              `query($org:String!){
+            // 1) Получить проект по номеру
+            const data = await github.graphql(
+              `query($org:String!, $number:Int!){
                 organization(login:$org){
-                  projectsV2(first:100){
-                    nodes{
-                      id
-                      title
-                      fields(first:100){
-                        nodes{
-                          ... on ProjectV2SingleSelectField {
-                            id
-                            name
-                            options { id name }
-                          }
+                  projectV2(number:$number){
+                    id
+                    title
+                    fields(first:100){
+                      nodes{
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                          options { id name }
                         }
                       }
                     }
                   }
                 }
               }`,
-              { org }
+              { org, number: projectNumber }
             );
 
-            const projects = orgData.organization?.projectsV2?.nodes || [];
-            const project = projects.find(p => p.title === projectTitle);
+            const project = data.organization?.projectV2;
             if (!project) {
-              core.setFailed(`Project "${projectTitle}" not found in org "${org}"`);
+              core.setFailed(`Project #${projectNumber} not found in org "${org}"`);
               return;
             }
 
             const statusField = (project.fields?.nodes || []).find(f => f?.name === statusFieldName);
             if (!statusField) {
-              core.setFailed(`Field "${statusFieldName}" not found in project "${projectTitle}"`);
+              core.setFailed(`Field "${statusFieldName}" not found in project "${project.title}"`);
               return;
             }
-
             const statusOption = (statusField.options || []).find(o => o.name === statusOptionName);
             if (!statusOption) {
               core.setFailed(`Status option "${statusOptionName}" not found in field "${statusFieldName}"`);
               return;
             }
 
-            // 2) Add PR to the project (if not already there)
+            // 2) Добавить PR в проект (если его там нет)
             let itemId = null;
             try {
               const addRes = await github.graphql(
@@ -92,7 +90,7 @@ jobs:
               core.info(`addProjectV2ItemById failed (maybe already exists): ${e.message}`);
             }
 
-            // 3) If itemId unknown, search for existing PR item in the project
+            // 3) Найти существующий item, если не получили id
             if (!itemId) {
               let after = null;
               for (;;) {
@@ -115,10 +113,7 @@ jobs:
                 const conn = itemsRes?.node?.items;
                 const nodes = conn?.nodes || [];
                 const match = nodes.find(n => n.content && n.content.id === prNodeId);
-                if (match) {
-                  itemId = match.id;
-                  break;
-                }
+                if (match) { itemId = match.id; break; }
                 if (!conn?.pageInfo?.hasNextPage) break;
                 after = conn.pageInfo.endCursor;
               }
@@ -129,7 +124,7 @@ jobs:
               return;
             }
 
-            // 4) Set Status = "In review"
+            // 4) Установить Status = "In review"
             await github.graphql(
               `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
                 updateProjectV2ItemFieldValue(input:{
