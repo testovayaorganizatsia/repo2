@@ -4,7 +4,6 @@ on:
   pull_request:
     types: [opened, reopened, ready_for_review]
 
-# permissions не влияют на PAT, но оставим минимальные
 permissions:
   contents: read
   pull-requests: read
@@ -13,28 +12,18 @@ jobs:
   move-to-in-review:
     runs-on: ubuntu-latest
     steps:
-      - name: Debug token access (viewer/org)
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.TOKEN_TEST }}
-          script: |
-            const org = 'testovayaorganizatsia';
-            const viewer = await github.graphql(`query { viewer { login } }`);
-            core.info(`Viewer: ${viewer.viewer.login}`);
-            try {
-              const orgRes = await github.request('GET /orgs/{org}', { org });
-              core.info(`Org ok: ${orgRes.data.login}`);
-            } catch (e) {
-              core.warning(`Org access failed: ${e.message}. Ensure PAT has read:org (fine-grained: Members: Read) and SSO enabled.`);
-            }
+      - name: Using new workflow version
+        run: |
+          echo "Using new PR → In review workflow at $GITHUB_SHA"
+          echo "Repo: $GITHUB_REPOSITORY | Event: $GITHUB_EVENT_NAME"
 
-      - name: Move PR to "In review"
+      - name: Move PR to In review
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.TOKEN_TEST }}
           script: |
             const org = 'testovayaorganizatsia';
-            const projectNumber = 1; // замените на номер из URL: https://github.com/orgs/<org>/projects/<number>
+            const projectNumber = 1; // замените на номер из URL
             const statusFieldName = 'Status';
             const statusOptionName = 'In review';
 
@@ -42,10 +31,10 @@ jobs:
             async function gql(q, v, retries=3){
               for (let i=0;i<retries;i++){
                 try { return await github.graphql(q, v); }
-                catch(e){ 
+                catch(e){
                   const msg = e?.message || String(e);
-                  if (i===retries-1) throw e;
-                  if (/Something went wrong/i.test(msg) || (e.status && e.status>=500)) {
+                  if (i === retries-1) { core.error(JSON.stringify(e, null, 2)); throw e; }
+                  if (/Something went wrong/i.test(msg) || (e.status && e.status >= 500)) {
                     core.warning(`Retry ${i+1}: ${msg}`); await sleep(1000*(i+1)); continue;
                   }
                   throw e;
@@ -57,7 +46,6 @@ jobs:
             if (!pr) return core.setFailed('No pull_request payload');
             if (pr.draft) { core.notice('PR is draft; skipping'); return; }
 
-            // 1) Получить проект по номеру
             const data = await gql(
               `query($org:String!, $number:Int!){
                 organization(login:$org){
@@ -84,9 +72,8 @@ jobs:
             const statusField = (project.fields?.nodes||[]).find(f => f?.name === statusFieldName);
             if (!statusField) return core.setFailed(`Field "${statusFieldName}" not found in project "${project.title}"`);
             const statusOption = (statusField.options||[]).find(o => o.name === statusOptionName);
-            if (!statusOption) return core.setFailed(`Option "${statusOptionName}" not found`);
+            if (!statusOption) return core.setFailed(`Option "${statusOptionName}" not found in "${statusFieldName}"`);
 
-            // 2) Добавить PR в проект
             const prNodeId = pr.node_id;
             let itemId = null;
             try {
@@ -103,7 +90,6 @@ jobs:
               core.info(`addProjectV2ItemById: ${e.message} (may already exist)`);
             }
 
-            // 3) Найти item, если уже существует
             if (!itemId) {
               let after = null;
               for (;;) {
@@ -121,7 +107,7 @@ jobs:
                   { projectId: project.id, after }
                 );
                 const conn = res?.node?.items;
-                const match = (conn?.nodes||[]).find(n => n.content && n.content.id === pr.node_id);
+                const match = (conn?.nodes||[]).find(n => n.content && n.content.id === prNodeId);
                 if (match) { itemId = match.id; break; }
                 if (!conn?.pageInfo?.hasNextPage) break;
                 after = conn.pageInfo.endCursor;
@@ -130,7 +116,6 @@ jobs:
 
             if (!itemId) return core.setFailed('Project item not found or could not be created');
 
-            // 4) Установить Status = "In review"
             await gql(
               `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
                 updateProjectV2ItemFieldValue(input:{
